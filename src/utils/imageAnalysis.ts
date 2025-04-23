@@ -47,10 +47,10 @@ async function getModels() {
     const modelId = 'jinaai/jina-clip-v1';
     const processorId = 'xenova/clip-vit-base-patch32';
 
-    processorPromise = processorPromise || AutoProcessor.from_pretrained(processorId, {});
-    visionModelPromise = visionModelPromise || CLIPVisionModelWithProjection.from_pretrained(modelId);
+    processorPromise = processorPromise || AutoProcessor.from_pretrained(processorId, {device: 'webgpu'});
+    visionModelPromise = visionModelPromise || CLIPVisionModelWithProjection.from_pretrained(modelId, {device: 'webgpu'});
     tokenizerPromise = tokenizerPromise || AutoTokenizer.from_pretrained(modelId);
-    textModelPromise = textModelPromise || CLIPTextModelWithProjection.from_pretrained(modelId);
+    textModelPromise = textModelPromise || CLIPTextModelWithProjection.from_pretrained(modelId, {device: 'webgpu'});
   }
   const [processor, vision_model, tokenizer, text_model] = await Promise.all([
     processorPromise!,

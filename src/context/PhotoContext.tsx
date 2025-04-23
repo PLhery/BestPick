@@ -1,9 +1,16 @@
-import React, { createContext, useContext, useReducer, useState } from 'react';
-import { AppState, Photo, PhotoGroup } from '../types';
+import React, { createContext, useContext, useReducer, useState, useEffect, useRef } from 'react';
+import { AppState, Photo, PhotoGroup, PhotoMetadata } from '../types';
 import { analyzeImage, groupSimilarPhotos, extractFeatures, prepareQualityEmbeddings } from '../utils/imageAnalysis';
+import { Tensor } from '@huggingface/transformers';
+
+// Define a type for the quality embeddings
+type QualityEmbeddings = {
+  positiveEmbeddings: Tensor;
+  negativeEmbeddings: Tensor;
+} | null;
 
 type PhotoAction = 
-  | { type: 'SET_PROCESSED_PHOTOS'; photos: Photo[]; groups: PhotoGroup[]; uniquePhotos: Photo[] }
+  | { type: 'ADD_PHOTO_AND_UPDATE_GROUPS'; photo: Photo; groups: PhotoGroup[]; uniquePhotos: Photo[] }
   | { type: 'TOGGLE_SELECT_PHOTO'; photoId: string }
   | { type: 'SELECT_ALL_IN_GROUP'; groupId: string }
   | { type: 'DESELECT_ALL_IN_GROUP'; groupId: string }
@@ -25,45 +32,75 @@ function reducer(state: AppState, action: PhotoAction): AppState {
   let newState: AppState;
 
   switch (action.type) {
-    case 'SET_PROCESSED_PHOTOS': {
-      const { photos, groups, uniquePhotos } = action;
+    case 'ADD_PHOTO_AND_UPDATE_GROUPS': {
+      const { photo, groups, uniquePhotos } = action;
 
-      const updatedStateBase: Omit<AppState, 'history' | 'currentHistoryIndex'> = {
+      // Add the new photo and update groups/unique photos
+      const updatedPhotos = [...state.photos, photo];
+      const updatedStateBase: Omit<AppState, 'history' | 'currentHistoryIndex' | 'selectedPhotos'> = {
         ...state,
-        photos: [...state.photos, ...photos],
+        photos: updatedPhotos,
         groups,
         uniquePhotos,
-        selectedPhotos: [],
       };
 
+      // Auto-select the best photo in each group and all unique photos
       const autoSelectedPhotos = [
-        ...uniquePhotos.map(photo => photo.id),
-        ...groups.map(group => group.photos[0].id)
+        ...uniquePhotos.map(p => p.id),
+        ...groups.map(g => g.photos[0].id) // Assumes groups photos are sorted by quality desc
       ];
-      
-      updatedStateBase.selectedPhotos = autoSelectedPhotos;
-      updatedStateBase.photos = updatedStateBase.photos.map(photo => ({
-        ...photo,
-        selected: autoSelectedPhotos.includes(photo.id)
+
+      // Ensure the newly added photo is selected if it's unique or best in its group
+      if (!autoSelectedPhotos.includes(photo.id)) {
+         const isUnique = uniquePhotos.some(p => p.id === photo.id);
+         // Select if unique, or if it ended up as the best in a new/updated group
+         if (isUnique || groups.find(g => g.photos[0].id === photo.id)) {
+           // This logic might need refinement based on exact desired UX for new photos
+           // For now, let's stick to selecting best-in-group and unique
+         }
+         // If the photo isn't selected automatically by the rules above,
+         // we don't add it here, respecting the auto-selection logic based on groups/unique.
+      }
+
+
+      // Create the final state before history update
+      const intermediateState: AppState = {
+        ...updatedStateBase,
+        selectedPhotos: autoSelectedPhotos,
+        history: state.history,
+        currentHistoryIndex: state.currentHistoryIndex,
+      };
+
+      // Update the 'selected' flag on all photos based on the new selection
+      intermediateState.photos = intermediateState.photos.map(p => ({
+        ...p,
+        selected: autoSelectedPhotos.includes(p.id)
       }));
-      
+
+      // --- History Update ---
       let history = state.history;
       let currentHistoryIndex = state.currentHistoryIndex;
 
-      const werePhotosAdded = photos.length > 0;
-      if (state.photos.length === 0 && werePhotosAdded) {
-        history = [{ selectedPhotos: updatedStateBase.selectedPhotos, timestamp: new Date() }];
+      // Always add a new history state when a photo is processed and groups potentially change
+      const newHistoryEntry = { selectedPhotos: intermediateState.selectedPhotos, timestamp: new Date() };
+
+      // If this is the very first photo added
+      if (state.photos.length === 0) {
+        history = [newHistoryEntry];
         currentHistoryIndex = 0;
-      } else if (werePhotosAdded) {
+      } else {
+        // Append to history, discarding any future states if we were in an undone state
         history = [
           ...state.history.slice(0, state.currentHistoryIndex + 1),
-          { selectedPhotos: updatedStateBase.selectedPhotos, timestamp: new Date() }
+          newHistoryEntry
         ];
-        currentHistoryIndex = state.currentHistoryIndex + 1;
+        currentHistoryIndex = history.length - 1; // Point to the new latest state
       }
+      // --- End History Update ---
 
+      // Final state with updated history
       const finalState: AppState = {
-        ...updatedStateBase,
+        ...intermediateState,
         history,
         currentHistoryIndex,
       };
@@ -250,6 +287,7 @@ function reducer(state: AppState, action: PhotoAction): AppState {
 interface PhotoContextType {
   state: AppState;
   isLoading: boolean;
+  isPreparingEmbeddings: boolean;
   addPhotos: (files: File[]) => void;
   toggleSelectPhoto: (photoId: string) => void;
   selectAllInGroup: (groupId: string) => void;
@@ -272,93 +310,152 @@ export function usePhotoContext() {
   return context;
 }
 
-export function PhotoProvider({ children }: { children: React.ReactNode }) {
+// Helper hook to get the latest state inside async functions
+function useReducerWithLatestState<S, A>(
+  reducer: React.Reducer<S, A>,
+  initialState: S
+): [S, React.Dispatch<A>, React.MutableRefObject<S>] {
   const [state, dispatch] = useReducer(reducer, initialState);
+  const stateRef = useRef(state);
+
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
+
+  return [state, dispatch, stateRef];
+}
+
+export function PhotoProvider({ children }: { children: React.ReactNode }) {
+  const [state, dispatch, stateRef] = useReducerWithLatestState(reducer, initialState);
   const [isLoading, setIsLoading] = useState(false);
+  const [isPreparingEmbeddings, setIsPreparingEmbeddings] = useState(true);
+  const [qualityEmbeddings, setQualityEmbeddings] = useState<QualityEmbeddings>(null);
+
+  // Prepare quality embeddings once on mount
+  useEffect(() => {
+    setIsPreparingEmbeddings(true);
+    prepareQualityEmbeddings()
+      .then(embeddings => {
+        setQualityEmbeddings(embeddings);
+        console.log("Quality embeddings prepared.");
+      })
+      .catch(error => {
+        console.error("Failed to prepare quality embeddings:", error);
+        // Handle error appropriately, maybe show a message to the user
+      })
+      .finally(() => {
+        setIsPreparingEmbeddings(false);
+      });
+  }, []); // Empty dependency array ensures this runs only once on mount
 
   const addPhotos = async (files: File[]) => {
     if (!files.length) return;
+    if (isPreparingEmbeddings || !qualityEmbeddings) {
+       console.warn("Quality embeddings not ready yet. Please wait.");
+       // Optionally: show a user-facing message
+       return;
+    }
 
     setIsLoading(true);
 
     try {
-      const photoPrepared: Omit<Photo, 'quality' | 'metadata' | 'embedding'>[] = files.map(file => {
-        const id = `${file.name}-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-        const url = URL.createObjectURL(file);
-        const thumbnailUrl = url;
-
-        return {
-          id,
-          file,
-          url,
-          thumbnailUrl,
-          name: file.name,
-          size: file.size,
-          type: file.type,
-          dateCreated: new Date(file.lastModified),
-          selected: false,
-        };
-      });
-
-      const photosWithEmbeddings: (Omit<Photo, 'quality' | 'metadata'> & { embedding?: number[] })[] = await Promise.all(
-        photoPrepared.map(async (photo) => {
-          try {
-            const embedding = await extractFeatures(photo as Photo);
-            return { ...photo, embedding };
-          } catch (error) {
-            console.error(`Failed to extract features for ${photo.name}:`, error);
-            return { ...photo, embedding: undefined };
-          }
-        })
-      );
-
-      const text_embeds = await prepareQualityEmbeddings();
-
-      const photosWithMetadata: Photo[] = await Promise.all(
-        photosWithEmbeddings.map(async (photo) => {
-          if (!photo.embedding) {
-            console.warn(`Skipping quality/metadata analysis for ${photo.name} due to missing embedding.`);
-            return {
-              ...photo,
-              quality: 0,
-              metadata: { captureDate: photo.dateCreated },
-              embedding: undefined
-            } as Photo;
-          }
-
-          try {
-            const { quality, metadata } = await analyzeImage(photo.file, photo.url, photo.embedding, text_embeds);
-            return {
-              ...photo,
-              quality,
-              metadata,
-              embedding: photo.embedding
-            };
-          } catch (error) {
-            console.error(`Failed to analyze image ${photo.name}:`, error);
-            return {
-              ...photo,
-              quality: 0,
-              metadata: { captureDate: photo.dateCreated },
-              embedding: photo.embedding
-            } as Photo;
-          }
-        })
-      );
+      for (const file of files) {
+         // 1. Prepare basic photo info
+         const id = `${file.name}-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+         const url = URL.createObjectURL(file);
+         const thumbnailUrl = url; // Use the same URL for thumbnail initially
+         const basicPhoto = {
+             id,
+             file,
+             url,
+             thumbnailUrl,
+             name: file.name,
+             size: file.size,
+             type: file.type,
+             dateCreated: new Date(file.lastModified),
+             selected: false, // Will be determined by reducer later
+         };
 
 
-      const allPhotosToGroup = [...state.photos, ...photosWithMetadata];
-      const { groups, uniquePhotos } = await groupSimilarPhotos(allPhotosToGroup);
+         // 2. Extract features (embedding)
+         let embedding: number[] | undefined = undefined;
+         try {
+             embedding = await extractFeatures(basicPhoto as Photo);
+         } catch (error) {
+             console.error(`Failed to extract features for ${basicPhoto.name}:`, error);
+         }
 
-      dispatch({
-        type: 'SET_PROCESSED_PHOTOS',
-        photos: photosWithMetadata,
-        groups,
-        uniquePhotos
-      });
+
+         // 3. Analyze image (quality and metadata)
+         let tempAnalysisResult: { quality: number; metadata: PhotoMetadata }; // Use PhotoMetadata which allows undefined captureDate
+         if (embedding) {
+           try {
+               tempAnalysisResult = await analyzeImage(
+                 basicPhoto.file,
+                 basicPhoto.url,
+                 embedding,
+                 qualityEmbeddings // Use pre-calculated embeddings
+               );
+           } catch (error) {
+               console.error(`Failed to analyze image ${basicPhoto.name}:`, error);
+               tempAnalysisResult = { quality: 0, metadata: {} }; // Default on error
+           }
+         } else {
+             console.warn(`Skipping quality/metadata analysis for ${basicPhoto.name} due to missing embedding.`);
+             // Basic metadata fallback is handled within analyzeImage, but quality remains 0
+             try {
+                // Still try to get basic metadata even without embedding
+                tempAnalysisResult = await analyzeImage(
+                    basicPhoto.file,
+                    basicPhoto.url,
+                    null, // No embedding
+                    null  // No quality embeddings needed if embedding is null
+                );
+             } catch (metaError) {
+                 console.error(`Failed to get basic metadata for ${basicPhoto.name}:`, metaError);
+                 tempAnalysisResult = { quality: 0, metadata: {} }; // Default on error
+             }
+         }
+
+         // Ensure analysisResult has the expected structure with a non-undefined captureDate
+         const analysisResult = {
+             quality: tempAnalysisResult.quality,
+             metadata: {
+                 ...tempAnalysisResult.metadata,
+                 captureDate: tempAnalysisResult.metadata.captureDate ?? basicPhoto.dateCreated
+             }
+         };
+
+         // 4. Combine into final Photo object
+         const newPhoto: Photo = {
+             ...basicPhoto,
+             quality: analysisResult.quality,
+             metadata: analysisResult.metadata, // Now analysisResult.metadata is guaranteed to match Photo['metadata'] structure
+             embedding: embedding,
+         };
+
+         // 5. Update state and regroup
+         // Get the latest state photos before calculating new groups
+         const currentPhotos = stateRef.current.photos;
+         const nextPhotos = [...currentPhotos, newPhoto];
+         const { groups, uniquePhotos } = await groupSimilarPhotos(nextPhotos);
+
+
+         // 6. Dispatch action to add photo and update groups
+         dispatch({
+             type: 'ADD_PHOTO_AND_UPDATE_GROUPS',
+             photo: newPhoto,
+             groups,
+             uniquePhotos
+         });
+
+         // Optional: Add a small delay here if updates are too rapid for the UI
+         // await new Promise(resolve => setTimeout(resolve, 50));
+      } // End for loop
 
     } catch (error) {
       console.error("Error processing photos:", error);
+      // Handle error appropriately
     } finally {
       setIsLoading(false);
     }
@@ -416,6 +513,7 @@ export function PhotoProvider({ children }: { children: React.ReactNode }) {
       value={{
         state,
         isLoading,
+        isPreparingEmbeddings,
         addPhotos,
         toggleSelectPhoto,
         selectAllInGroup,
