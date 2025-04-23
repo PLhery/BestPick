@@ -4,8 +4,8 @@ import Header from './components/Header';
 import UploadArea from './components/UploadArea';
 import PhotoGroups from './components/PhotoGroups';
 import UniquePhotos from './components/UniquePhotos';
-import EmptyState from './components/EmptyState';
 import { Loader2 } from 'lucide-react';
+import previewImageUrl from '../preview.png';
 
 const LoadingOverlay: React.FC = () => (
   <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50">
@@ -32,7 +32,13 @@ const MainContent: React.FC = () => {
           <>
             <h1 className="text-3xl font-bold mb-6 px-4">Organize Your Photos</h1>
             <UploadArea />
-            <EmptyState />
+            <div className="mt-8 px-4 text-center">
+              <img 
+                src={previewImageUrl}
+                alt="BestPick App Preview"
+                className="max-w-full md:max-w-4xl mx-auto rounded-lg shadow-lg border border-gray-700"
+              />
+            </div>
           </>
         ) : (
           <>

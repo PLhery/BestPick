@@ -66,7 +66,7 @@ const UploadArea: React.FC = () => {
       
       <p className="text-gray-400 mb-6 text-center max-w-md">
         Upload multiple photos to organize and declutter your collection.
-        We'll automatically group similar photos together.
+        Everything happens in your browser, so your photos stay private!
       </p>
       
       <div className="flex gap-4">
