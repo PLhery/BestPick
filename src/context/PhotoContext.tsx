@@ -346,13 +346,9 @@ export function PhotoProvider({ children }: { children: React.ReactNode }) {
         })
       );
 
-      console.log('Photos with metadata:', photosWithMetadata);
 
       const allPhotosToGroup = [...state.photos, ...photosWithMetadata];
       const { groups, uniquePhotos } = await groupSimilarPhotos(allPhotosToGroup);
-
-      console.log('Groups:', groups);
-      console.log('Unique Photos:', uniquePhotos);
 
       dispatch({
         type: 'SET_PROCESSED_PHOTOS',

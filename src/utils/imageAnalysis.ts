@@ -47,7 +47,7 @@ async function getModels() {
     const modelId = 'jinaai/jina-clip-v1';
     const processorId = 'xenova/clip-vit-base-patch32';
 
-    processorPromise = processorPromise || AutoProcessor.from_pretrained(processorId, { });
+    processorPromise = processorPromise || AutoProcessor.from_pretrained(processorId, {});
     visionModelPromise = visionModelPromise || CLIPVisionModelWithProjection.from_pretrained(modelId);
     tokenizerPromise = tokenizerPromise || AutoTokenizer.from_pretrained(modelId);
     textModelPromise = textModelPromise || CLIPTextModelWithProjection.from_pretrained(modelId);
@@ -158,7 +158,6 @@ export async function analyzeImage(
   });
 }
 
-/* ---------- Deduplication ---------------------------------------------- */
 export async function groupSimilarPhotos(
   photos: Photo[],
   similarityThreshold: number = 0.7
@@ -173,20 +172,16 @@ export async function groupSimilarPhotos(
 
   const n = photosWithEmbeddings.length;
   const embeddingDim = photosWithEmbeddings[0].embedding!.length;
-  const allEmbeddings = photosWithEmbeddings.flatMap(p => p.embedding!);
-
   const embeddingsTensor = new Tensor(
     'float32',
-    Float32Array.from(allEmbeddings),
+    Float32Array.from(photosWithEmbeddings.flatMap(p => p.embedding!)),
     [n, embeddingDim]
   );
-
-  // Calculate similarity matrix (n x n)
   const similarityMatrix = await matmul(embeddingsTensor, embeddingsTensor.transpose(1, 0));
   const similarities = await similarityMatrix.data as Float32Array;
 
   const groups: PhotoGroup[] = [];
-  const uniquePhotos: Photo[] = [...photosWithoutEmbeddings]; // Start with photos without embeddings
+  const uniquePhotos: Photo[] = [...photosWithoutEmbeddings];
   const processed = new Set<string>();
 
   for (let i = 0; i < n; i++) {
@@ -201,10 +196,18 @@ export async function groupSimilarPhotos(
       const photoB = photosWithEmbeddings[j];
       if (processed.has(photoB.id)) continue;
 
-      // Similarity from the precomputed matrix (row i, col j)
+      // Temporal filtering --------------------------------------------------
+      const dateA = photoA.metadata?.captureDate;
+      const dateB = photoB.metadata?.captureDate;
+      const diffMinutes = Math.abs(dateA!.getTime() - dateB!.getTime()) / 60000;
+      if (diffMinutes > 120) continue; // > 2 h ⇒ never group
+
+      const threshold = (diffMinutes <= 1) ?
+        Math.max(0, similarityThreshold - 0.05) :
+        ((diffMinutes > 10) ? Math.min(1, similarityThreshold + 0.05) : similarityThreshold);
       const similarity = similarities[i * n + j];
 
-      if (similarity >= similarityThreshold) {
+      if (similarity >= threshold) {
         currentGroupIndices.push(j);
         minSimilarityInGroup = Math.min(minSimilarityInGroup, similarity);
         processed.add(photoB.id);
