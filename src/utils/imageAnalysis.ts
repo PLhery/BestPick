@@ -6,7 +6,6 @@ import {
   CLIPVisionModelWithProjection,
   RawImage,
   Tensor,
-  cos_sim,
   matmul,
 } from '@huggingface/transformers';
 import ExifReader from 'ExifReader';
@@ -48,7 +47,7 @@ async function getModels() {
     const modelId = 'jinaai/jina-clip-v1';
     const processorId = 'xenova/clip-vit-base-patch32';
 
-    processorPromise = processorPromise || AutoProcessor.from_pretrained(processorId, { device: 'webgpu' });
+    processorPromise = processorPromise || AutoProcessor.from_pretrained(processorId, { });
     visionModelPromise = visionModelPromise || CLIPVisionModelWithProjection.from_pretrained(modelId);
     tokenizerPromise = tokenizerPromise || AutoTokenizer.from_pretrained(modelId);
     textModelPromise = textModelPromise || CLIPTextModelWithProjection.from_pretrained(modelId);
@@ -93,7 +92,6 @@ export async function prepareQualityEmbeddings(): Promise<{
     [nPos, nPos + nNeg],
     [0, normedEmbeds.dims[1]]
   );
-  text_model.dispose();
   return { positiveEmbeddings, negativeEmbeddings };
 }
 
@@ -138,7 +136,6 @@ export async function analyzeImage(
 
   const arrayBuffer = await file.arrayBuffer();
   const exifTags = ExifReader.load(arrayBuffer);
-  console.log('exif', exifTags)
 
   const dateFromExif = exifTags?.['DateTimeOriginal']?.description || exifTags?.['DateTime']?.description
 
@@ -162,49 +159,66 @@ export async function analyzeImage(
 }
 
 /* ---------- Deduplication ---------------------------------------------- */
-export function groupSimilarPhotos(
+export async function groupSimilarPhotos(
   photos: Photo[],
   similarityThreshold: number = 0.7
-): { groups: PhotoGroup[]; uniquePhotos: Photo[] } {
+): Promise<{ groups: PhotoGroup[]; uniquePhotos: Photo[] }> {
   const photosWithEmbeddings = photos.filter(p => p.embedding && p.embedding.length > 0);
-  if (photosWithEmbeddings.length === 0) {
-    const photosWithoutEmbeddings = photos.filter(p => !p.embedding || p.embedding.length === 0);
-    photosWithoutEmbeddings.sort((a, b) => b.dateCreated.getTime() - a.dateCreated.getTime());
-    return { groups: [], uniquePhotos: photosWithoutEmbeddings };
+  const photosWithoutEmbeddings = photos.filter(p => !p.embedding || p.embedding.length === 0);
+
+  if (photosWithEmbeddings.length < 2) {
+    photos.sort((a, b) => b.metadata!.captureDate!.getTime() - a.metadata!.captureDate!.getTime());
+    return { groups: [], uniquePhotos: photos };
   }
 
+  const n = photosWithEmbeddings.length;
+  const embeddingDim = photosWithEmbeddings[0].embedding!.length;
+  const allEmbeddings = photosWithEmbeddings.flatMap(p => p.embedding!);
+
+  const embeddingsTensor = new Tensor(
+    'float32',
+    Float32Array.from(allEmbeddings),
+    [n, embeddingDim]
+  );
+
+  // Calculate similarity matrix (n x n)
+  const similarityMatrix = await matmul(embeddingsTensor, embeddingsTensor.transpose(1, 0));
+  const similarities = await similarityMatrix.data as Float32Array;
+
   const groups: PhotoGroup[] = [];
-  const uniquePhotos: Photo[] = [];
+  const uniquePhotos: Photo[] = [...photosWithoutEmbeddings]; // Start with photos without embeddings
   const processed = new Set<string>();
 
-  for (let i = 0; i < photosWithEmbeddings.length; i++) {
+  for (let i = 0; i < n; i++) {
     const photoA = photosWithEmbeddings[i];
     if (processed.has(photoA.id)) continue;
 
-    const currentGroupPhotos: Photo[] = [photoA];
+    const currentGroupIndices: number[] = [i];
     let minSimilarityInGroup = 1.0;
     processed.add(photoA.id);
 
-    for (let j = i + 1; j < photosWithEmbeddings.length; j++) {
+    for (let j = i + 1; j < n; j++) {
       const photoB = photosWithEmbeddings[j];
       if (processed.has(photoB.id)) continue;
 
-      if (photoA.embedding && photoB.embedding) {
-        const similarity = cos_sim(photoA.embedding, photoB.embedding);
-        if (similarity >= similarityThreshold) {
-          currentGroupPhotos.push(photoB);
-          minSimilarityInGroup = Math.min(minSimilarityInGroup, similarity);
-          processed.add(photoB.id);
-        }
+      // Similarity from the precomputed matrix (row i, col j)
+      const similarity = similarities[i * n + j];
+
+      if (similarity >= similarityThreshold) {
+        currentGroupIndices.push(j);
+        minSimilarityInGroup = Math.min(minSimilarityInGroup, similarity);
+        processed.add(photoB.id);
       }
     }
+
+    const currentGroupPhotos = currentGroupIndices.map(index => photosWithEmbeddings[index]);
 
     if (currentGroupPhotos.length > 1) {
       const sortedPhotos = [...currentGroupPhotos].sort((a, b) => (b.quality ?? 0) - (a.quality ?? 0));
       groups.push({
         id: `${sortedPhotos[0].id}-group`,
         title: getGroupTitle(sortedPhotos[0]),
-        date: sortedPhotos[0].dateCreated,
+        date: sortedPhotos[0].metadata!.captureDate!,
         photos: sortedPhotos,
         similarity: minSimilarityInGroup,
         similarityThreshold,
@@ -214,15 +228,9 @@ export function groupSimilarPhotos(
     }
   }
 
-  // ensure photos lacking embeddings are preserved
-  photos.forEach(p => {
-    if ((!p.embedding || p.embedding.length === 0) && !uniquePhotos.some(up => up.id === p.id)) {
-      uniquePhotos.push(p);
-    }
-  });
-
+  // Only need to sort uniquePhotos once at the end
   groups.sort((a, b) => b.date.getTime() - a.date.getTime());
-  uniquePhotos.sort((a, b) => b.dateCreated.getTime() - a.dateCreated.getTime());
+  uniquePhotos.sort((a, b) => b.metadata!.captureDate!.getTime() - a.metadata!.captureDate!.getTime());
   return { groups, uniquePhotos };
 }
 

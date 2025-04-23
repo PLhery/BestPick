@@ -1,15 +1,14 @@
 import React, { createContext, useContext, useReducer, useState } from 'react';
-import { AppState, Photo } from '../types';
+import { AppState, Photo, PhotoGroup } from '../types';
 import { analyzeImage, groupSimilarPhotos, extractFeatures, prepareQualityEmbeddings } from '../utils/imageAnalysis';
 
 type PhotoAction = 
-  | { type: 'ADD_PHOTOS'; photos: Photo[] }
+  | { type: 'SET_PROCESSED_PHOTOS'; photos: Photo[]; groups: PhotoGroup[]; uniquePhotos: Photo[] }
   | { type: 'TOGGLE_SELECT_PHOTO'; photoId: string }
   | { type: 'SELECT_ALL_IN_GROUP'; groupId: string }
   | { type: 'DESELECT_ALL_IN_GROUP'; groupId: string }
   | { type: 'SELECT_ALL' }
   | { type: 'DESELECT_ALL' }
-  | { type: 'UPDATE_GROUPS' }
   | { type: 'UNDO' }
   | { type: 'REDO' };
 
@@ -26,42 +25,50 @@ function reducer(state: AppState, action: PhotoAction): AppState {
   let newState: AppState;
 
   switch (action.type) {
-    case 'ADD_PHOTOS': {
-      const newState: AppState = {
+    case 'SET_PROCESSED_PHOTOS': {
+      const { photos, groups, uniquePhotos } = action;
+
+      const updatedStateBase: Omit<AppState, 'history' | 'currentHistoryIndex'> = {
         ...state,
-        photos: [...state.photos, ...action.photos],
+        photos: [...state.photos, ...photos],
+        groups,
+        uniquePhotos,
+        selectedPhotos: [],
       };
-      // After adding photos, regroup all photos
-      const { groups, uniquePhotos } = groupSimilarPhotos(newState.photos);
-      newState.groups = groups;
-      newState.uniquePhotos = uniquePhotos;
-      
-      // Auto-select unique photos and best photos from groups
+
       const autoSelectedPhotos = [
         ...uniquePhotos.map(photo => photo.id),
         ...groups.map(group => group.photos[0].id)
       ];
       
-      newState.selectedPhotos = autoSelectedPhotos;
-      newState.photos = newState.photos.map(photo => ({
+      updatedStateBase.selectedPhotos = autoSelectedPhotos;
+      updatedStateBase.photos = updatedStateBase.photos.map(photo => ({
         ...photo,
         selected: autoSelectedPhotos.includes(photo.id)
       }));
       
-      // Add initial state to history if it's the first addition
-      if (state.photos.length === 0 && newState.photos.length > 0) {
-        newState.history = [{ selectedPhotos: newState.selectedPhotos, timestamp: new Date() }];
-        newState.currentHistoryIndex = 0;
-      } else if (newState.photos.length > state.photos.length) {
-        // Only add history if photos were actually added
-        newState.history = [
+      let history = state.history;
+      let currentHistoryIndex = state.currentHistoryIndex;
+
+      const werePhotosAdded = photos.length > 0;
+      if (state.photos.length === 0 && werePhotosAdded) {
+        history = [{ selectedPhotos: updatedStateBase.selectedPhotos, timestamp: new Date() }];
+        currentHistoryIndex = 0;
+      } else if (werePhotosAdded) {
+        history = [
           ...state.history.slice(0, state.currentHistoryIndex + 1),
-          { selectedPhotos: newState.selectedPhotos, timestamp: new Date() }
+          { selectedPhotos: updatedStateBase.selectedPhotos, timestamp: new Date() }
         ];
-        newState.currentHistoryIndex = state.currentHistoryIndex + 1;
+        currentHistoryIndex = state.currentHistoryIndex + 1;
       }
 
-      return newState;
+      const finalState: AppState = {
+        ...updatedStateBase,
+        history,
+        currentHistoryIndex,
+      };
+
+      return finalState;
     }
 
     case 'TOGGLE_SELECT_PHOTO': {
@@ -84,7 +91,6 @@ function reducer(state: AppState, action: PhotoAction): AppState {
         currentHistoryIndex: state.currentHistoryIndex + 1,
       };
       
-      // Update the selected state in photos array
       newState.photos = state.photos.map(photo => 
         photo.id === action.photoId 
           ? { ...photo, selected: !photo.selected } 
@@ -102,9 +108,8 @@ function reducer(state: AppState, action: PhotoAction): AppState {
       const newSelectedPhotosSet = new Set([...state.selectedPhotos, ...photoIds]);
       const newSelectedPhotos = Array.from(newSelectedPhotosSet);
       
-      // Check if selection actually changed before updating history
       if (newSelectedPhotos.length === state.selectedPhotos.length && newSelectedPhotos.every(id => state.selectedPhotos.includes(id))) {
-        return state; // No change
+        return state;
       }
 
       newState = {
@@ -117,7 +122,6 @@ function reducer(state: AppState, action: PhotoAction): AppState {
         currentHistoryIndex: state.currentHistoryIndex + 1,
       };
       
-      // Update the selected state in photos array
       newState.photos = state.photos.map(photo => 
         photoIds.includes(photo.id) 
           ? { ...photo, selected: true } 
@@ -135,9 +139,8 @@ function reducer(state: AppState, action: PhotoAction): AppState {
       const initialSelectedCount = state.selectedPhotos.length;
       const newSelectedPhotos = state.selectedPhotos.filter(id => !photoIds.includes(id));
 
-      // Check if selection actually changed before updating history
       if (newSelectedPhotos.length === initialSelectedCount) {
-        return state; // No change
+        return state;
       }
 
       newState = {
@@ -150,7 +153,6 @@ function reducer(state: AppState, action: PhotoAction): AppState {
         currentHistoryIndex: state.currentHistoryIndex + 1,
       };
       
-      // Update the selected state in photos array
       newState.photos = state.photos.map(photo => 
         photoIds.includes(photo.id) 
           ? { ...photo, selected: false } 
@@ -163,9 +165,8 @@ function reducer(state: AppState, action: PhotoAction): AppState {
     case 'SELECT_ALL': {
       const allPhotoIds = state.photos.map(photo => photo.id);
       
-      // Check if selection actually changed before updating history
       if (allPhotoIds.length === state.selectedPhotos.length && allPhotoIds.every(id => state.selectedPhotos.includes(id))) {
-        return state; // No change
+        return state;
       }
 
       newState = {
@@ -178,16 +179,14 @@ function reducer(state: AppState, action: PhotoAction): AppState {
         currentHistoryIndex: state.currentHistoryIndex + 1,
       };
       
-      // Update the selected state in photos array
       newState.photos = state.photos.map(photo => ({ ...photo, selected: true }));
       
       return newState;
     }
 
     case 'DESELECT_ALL': {
-      // Check if selection actually changed before updating history
       if (state.selectedPhotos.length === 0) {
-        return state; // No change
+        return state;
       }
       
       newState = {
@@ -200,26 +199,9 @@ function reducer(state: AppState, action: PhotoAction): AppState {
         currentHistoryIndex: state.currentHistoryIndex + 1,
       };
       
-      // Update the selected state in photos array
       newState.photos = state.photos.map(photo => ({ ...photo, selected: false }));
       
       return newState;
-    }
-
-    case 'UPDATE_GROUPS': {
-      const { groups, uniquePhotos } = groupSimilarPhotos(state.photos);
-      // Avoid unnecessary state update if groups/unique haven't changed
-      if (
-        JSON.stringify(groups) === JSON.stringify(state.groups) &&
-        JSON.stringify(uniquePhotos) === JSON.stringify(state.uniquePhotos)
-      ) {
-        return state;
-      }
-      return {
-        ...state,
-        groups,
-        uniquePhotos
-      };
     }
 
     case 'UNDO': {
@@ -233,7 +215,6 @@ function reducer(state: AppState, action: PhotoAction): AppState {
         currentHistoryIndex: state.currentHistoryIndex - 1,
       };
       
-      // Update the selected state in photos array
       newState.photos = state.photos.map(photo => ({
         ...photo,
         selected: historyState.selectedPhotos.includes(photo.id)
@@ -253,7 +234,6 @@ function reducer(state: AppState, action: PhotoAction): AppState {
         currentHistoryIndex: state.currentHistoryIndex + 1,
       };
       
-      // Update the selected state in photos array
       newState.photos = state.photos.map(photo => ({
         ...photo,
         selected: historyState.selectedPhotos.includes(photo.id)
@@ -284,7 +264,6 @@ interface PhotoContextType {
 
 const PhotoContext = createContext<PhotoContextType | undefined>(undefined);
 
-// Add the usePhotoContext hook definition and export it
 export function usePhotoContext() {
   const context = useContext(PhotoContext);
   if (context === undefined) {
@@ -302,14 +281,12 @@ export function PhotoProvider({ children }: { children: React.ReactNode }) {
 
     setIsLoading(true);
 
-    // Step 0: Analyze basic metadata and create initial Photo objects
-    const photoPrepared: Photo[] = await Promise.all(
-      files.map(async (file) => {
-        // Filter out non-image files earlier? Or handle errors in analyzeImage
+    try {
+      const photoPrepared: Omit<Photo, 'quality' | 'metadata' | 'embedding'>[] = files.map(file => {
         const id = `${file.name}-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
         const url = URL.createObjectURL(file);
-        const thumbnailUrl = url; // Placeholder
-        
+        const thumbnailUrl = url;
+
         return {
           id,
           file,
@@ -319,46 +296,76 @@ export function PhotoProvider({ children }: { children: React.ReactNode }) {
           size: file.size,
           type: file.type,
           dateCreated: new Date(file.lastModified),
-          selected: false, // Initial selection happens in reducer
-          // embedding will be added next
+          selected: false,
         };
-      })
-    );
+      });
 
-    // Step 1: Extract features (embeddings) for each photo
-    // TODO: Add progress reporting using the callback
-    const photosWithEmbeddings: Photo[] = await Promise.all(
-      photoPrepared.map(async (photo) => {
-        try {
-          const embedding = await extractFeatures(photo /*, progressCallback */);
-          return { ...photo, embedding };
-        } catch (error) {
-          console.error(`Failed to extract features for ${photo.name}:`, error);
-          // Return the photo without embedding if extraction fails
-          return photo; 
-        }
-      })
-    );
+      const photosWithEmbeddings: (Omit<Photo, 'quality' | 'metadata'> & { embedding?: number[] })[] = await Promise.all(
+        photoPrepared.map(async (photo) => {
+          try {
+            const embedding = await extractFeatures(photo as Photo);
+            return { ...photo, embedding };
+          } catch (error) {
+            console.error(`Failed to extract features for ${photo.name}:`, error);
+            return { ...photo, embedding: undefined };
+          }
+        })
+      );
 
-    const text_embeds = await prepareQualityEmbeddings();
+      const text_embeds = await prepareQualityEmbeddings();
 
-    // Step 2: Analyze basic metadata and create initial Photo objects
-    const photosWithMetadata: Photo[] = await Promise.all(
-      photosWithEmbeddings.map(async (photo) => {
-        const { quality, metadata } = await analyzeImage(photo.file, photo.url, photo.embedding!, text_embeds);
-        
-        return {
-          ...photo,
-          quality,
-          metadata,
-        };
-      })
-    );
+      const photosWithMetadata: Photo[] = await Promise.all(
+        photosWithEmbeddings.map(async (photo) => {
+          if (!photo.embedding) {
+            console.warn(`Skipping quality/metadata analysis for ${photo.name} due to missing embedding.`);
+            return {
+              ...photo,
+              quality: 0,
+              metadata: { captureDate: photo.dateCreated },
+              embedding: undefined
+            } as Photo;
+          }
 
-    console.log('withMetadataReady', photosWithMetadata);
-    
-    dispatch({ type: 'ADD_PHOTOS', photos: photosWithMetadata });
-    setIsLoading(false);
+          try {
+            const { quality, metadata } = await analyzeImage(photo.file, photo.url, photo.embedding, text_embeds);
+            return {
+              ...photo,
+              quality,
+              metadata,
+              embedding: photo.embedding
+            };
+          } catch (error) {
+            console.error(`Failed to analyze image ${photo.name}:`, error);
+            return {
+              ...photo,
+              quality: 0,
+              metadata: { captureDate: photo.dateCreated },
+              embedding: photo.embedding
+            } as Photo;
+          }
+        })
+      );
+
+      console.log('Photos with metadata:', photosWithMetadata);
+
+      const allPhotosToGroup = [...state.photos, ...photosWithMetadata];
+      const { groups, uniquePhotos } = await groupSimilarPhotos(allPhotosToGroup);
+
+      console.log('Groups:', groups);
+      console.log('Unique Photos:', uniquePhotos);
+
+      dispatch({
+        type: 'SET_PROCESSED_PHOTOS',
+        photos: photosWithMetadata,
+        groups,
+        uniquePhotos
+      });
+
+    } catch (error) {
+      console.error("Error processing photos:", error);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const toggleSelectPhoto = (photoId: string) => {
@@ -393,14 +400,12 @@ export function PhotoProvider({ children }: { children: React.ReactNode }) {
     state.selectedPhotos.forEach(photoId => {
       const photo = state.photos.find(p => p.id === photoId);
       if (photo) {
-        // Revoke object URL after download? Maybe better to use file directly if possible.
         const link = document.createElement('a');
         link.href = photo.url;
         link.download = photo.name;
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
-        // Revoke the object URL to free up memory
         URL.revokeObjectURL(photo.url);
       }
     });
