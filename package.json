@@ -12,6 +12,7 @@
   "dependencies": {
     "@huggingface/transformers": "^3.5.0",
     "exifreader": "^4.29.0",
+    "heic-to": "^1.1.12",
     "lucide-react": "^0.503.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"

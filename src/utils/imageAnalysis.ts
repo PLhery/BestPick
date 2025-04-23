@@ -63,7 +63,7 @@ async function getModels() {
 
 export async function extractFeatures(photo: Photo): Promise<number[]> {
   const { processor, vision_model } = await getModels();
-  const image = await RawImage.read(photo.file);
+  const image = await RawImage.read(photo.nonHeicFile);
   const image_inputs = await (processor as any)([image]);
   const { image_embeds } = await vision_model(image_inputs);
   return Array.from(image_embeds.normalize(2, -1).data);
@@ -97,9 +97,8 @@ export async function prepareQualityEmbeddings(): Promise<{
 
 /* ---------- Quality + metadata analysis -------------------------------- */
 export async function analyzeImage(
-  file: File,
-  url: string,
-  embedding: number[] | null,
+  photo: Photo,
+  embedding: number[] | undefined,
   qualityEmbeddings: { positiveEmbeddings: Tensor; negativeEmbeddings: Tensor } | null
 ): Promise<{ quality: number; metadata: PhotoMetadata }> {
 
@@ -134,28 +133,15 @@ export async function analyzeImage(
     quality = 0;
   }
 
-  const arrayBuffer = await file.arrayBuffer();
+  const arrayBuffer = await photo.file.arrayBuffer();
   const exifTags = ExifReader.load(arrayBuffer);
 
   const dateFromExif = exifTags?.['DateTimeOriginal']?.description || exifTags?.['DateTime']?.description
 
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => {
-      const metadata: PhotoMetadata = {
-        width: img.width,
-        height: img.height,
-        captureDate: new Date(dateFromExif?.replace(/^(\d{4}):(\d{2}):(\d{2})/, "$1-$2-$3") || file.lastModified),
-      };
-      resolve({ quality, metadata });
-    };
-    img.onerror = () => {
-      console.error("Error loading image for metadata:", url);
-      const metadata: PhotoMetadata = { captureDate: new Date(file.lastModified) };
-      resolve({ quality, metadata });
-    };
-    img.src = url;
-  });
+  const metadata: PhotoMetadata = {
+    captureDate: new Date(dateFromExif?.replace(/^(\d{4}):(\d{2}):(\d{2})/, "$1-$2-$3") || photo.file.lastModified),
+  };
+  return { quality, metadata };
 }
 
 export async function groupSimilarPhotos(

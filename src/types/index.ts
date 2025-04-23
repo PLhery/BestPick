@@ -1,6 +1,7 @@
 export interface Photo {
   id: string;
   file: File;
+  nonHeicFile: File;
   url: string;
   thumbnailUrl: string;
   name: string;
@@ -14,8 +15,6 @@ export interface Photo {
 }
 
 export interface PhotoMetadata {
-  width?: number;
-  height?: number;
   captureDate?: Date;
   camera?: string;
   location?: string;
