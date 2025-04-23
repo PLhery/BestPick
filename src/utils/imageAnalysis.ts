@@ -8,7 +8,7 @@ import {
   Tensor,
   matmul,
 } from '@huggingface/transformers';
-import ExifReader from 'ExifReader';
+import ExifReader from 'exifreader';
 
 const positiveQualityPrompts = [
   "a high-quality photo",
