@@ -363,13 +363,17 @@ export function PhotoProvider({ children }: { children: React.ReactNode }) {
       for (const file of files) {
         // 1. Prepare basic photo info
         const id = `${file.name}-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-        
-        const nonHeicFile = await isHeic(file) ? new File([(await heicTo({
+
+        const ua = navigator.userAgent;
+        const isSafari = /^((?!chrome|android).)*safari/i.test(ua);
+
+        const nonHeicFile = !isSafari && await isHeic(file) ? new File([(await heicTo({
           blob: file,
           type: "image/jpeg",
           quality: 0.8,
         })) as Blob], file.name.replace(/\.hei[c|f]$/i, '.jpg'), { type: 'image/jpeg' }) : file;
         const url = URL.createObjectURL(nonHeicFile);
+        console.log(file, nonHeicFile)
         const basicPhoto = {
           id,
           file,
@@ -395,16 +399,16 @@ export function PhotoProvider({ children }: { children: React.ReactNode }) {
 
         // 3. Analyze image (quality and metadata)
         let tempAnalysisResult: { quality: number; metadata: PhotoMetadata }; // Use PhotoMetadata which allows undefined captureDate
-          try {
-            tempAnalysisResult = await analyzeImage(
-              basicPhoto,
-              embedding,
-              qualityEmbeddings // Use pre-calculated embeddings
-            );
-          } catch (error) {
-            console.error(`Failed to analyze image ${basicPhoto.name}:`, error);
-            tempAnalysisResult = { quality: 0, metadata: {} }; // Default on error
-          }
+        try {
+          tempAnalysisResult = await analyzeImage(
+            basicPhoto,
+            embedding,
+            qualityEmbeddings // Use pre-calculated embeddings
+          );
+        } catch (error) {
+          console.error(`Failed to analyze image ${basicPhoto.name}:`, error);
+          tempAnalysisResult = { quality: 0, metadata: {} }; // Default on error
+        }
 
         // Ensure analysisResult has the expected structure with a non-undefined captureDate
         const analysisResult = {
