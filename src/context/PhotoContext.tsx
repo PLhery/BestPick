@@ -338,7 +338,6 @@ export function PhotoProvider({ children }: { children: React.ReactNode }) {
     prepareQualityEmbeddings()
       .then(embeddings => {
         setQualityEmbeddings(embeddings);
-        console.log("Quality embeddings prepared.");
       })
       .catch(error => {
         console.error("Failed to prepare quality embeddings:", error);
@@ -373,7 +372,6 @@ export function PhotoProvider({ children }: { children: React.ReactNode }) {
           quality: 0.8,
         })) as Blob], file.name.replace(/\.hei[c|f]$/i, '.jpg'), { type: 'image/jpeg' }) : file;
         const url = URL.createObjectURL(nonHeicFile);
-        console.log(file, nonHeicFile)
         const basicPhoto = {
           id,
           file,

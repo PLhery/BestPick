@@ -2,44 +2,17 @@ import { Photo, PhotoGroup, PhotoMetadata } from '../types';
 import {
   AutoProcessor,
   AutoTokenizer,
-  CLIPTextModelWithProjection,
   CLIPVisionModelWithProjection,
   RawImage,
   Tensor,
   matmul,
 } from '@huggingface/transformers';
 import ExifReader from 'exifreader';
-
-const positiveQualityPrompts = [
-  "a high-quality photo",
-  "a sharp photo",
-  "a clear photo",
-  "a well-lit photo",
-  "a vibrant photo",
-  "a professional photo",
-  "a happy photo",
-  "a cool photo",
-  "a classy photo",
-  "a smiling person"
-];
-
-const negativeQualityPrompts = [
-  "a low-quality photo",
-  "a blurry photo",
-  "an out-of-focus photo",
-  "a dark photo",
-  "a noisy photo",
-  "an amateur photo",
-  "a sad photo",
-  "a poorly composed photo",
-  "a bad photo",
-  "a messy background"
-];
+import qualityEmbedsData from '../data/qualityEmbeds.json';
 
 /* ---------- Model lazy‑loading ----------------------------------------- */
 let visionModelPromise: Promise<InstanceType<typeof CLIPVisionModelWithProjection>> | null = null;
 let processorPromise: Promise<InstanceType<typeof AutoProcessor>> | null = null;
-let textModelPromise: Promise<InstanceType<typeof CLIPTextModelWithProjection>> | null = null;
 let tokenizerPromise: Promise<InstanceType<typeof AutoTokenizer>> | null = null;
 
 async function getModels() {
@@ -48,17 +21,15 @@ async function getModels() {
     const processorId = 'xenova/clip-vit-base-patch32';
 
     processorPromise = processorPromise || AutoProcessor.from_pretrained(processorId, {device: 'auto'});
-    visionModelPromise = visionModelPromise || CLIPVisionModelWithProjection.from_pretrained(modelId, {device: 'auto'});
+    visionModelPromise = visionModelPromise || CLIPVisionModelWithProjection.from_pretrained(modelId, {device: 'auto', dtype: 'fp32'});
     tokenizerPromise = tokenizerPromise || AutoTokenizer.from_pretrained(modelId);
-    textModelPromise = textModelPromise || CLIPTextModelWithProjection.from_pretrained(modelId, {device: 'auto'});
   }
-  const [processor, vision_model, tokenizer, text_model] = await Promise.all([
+  const [processor, vision_model, tokenizer] = await Promise.all([
     processorPromise!,
     visionModelPromise!,
     tokenizerPromise!,
-    textModelPromise!,
   ]);
-  return { processor, vision_model, tokenizer, text_model };
+  return { processor, vision_model, tokenizer };
 }
 
 export async function extractFeatures(photo: Photo): Promise<number[]> {
@@ -73,25 +44,28 @@ export async function prepareQualityEmbeddings(): Promise<{
   positiveEmbeddings: Tensor;
   negativeEmbeddings: Tensor;
 }> {
-  const { tokenizer, text_model } = await getModels();
-  const allPrompts = [...positiveQualityPrompts, ...negativeQualityPrompts];
+  // Load embeddings from the JSON file instead of generating them
+  const positiveEmbeddingsData = qualityEmbedsData.positive;
+  const negativeEmbeddingsData = qualityEmbedsData.negative;
 
-  const text_inputs = (tokenizer as any)(allPrompts, { padding: true, truncation: true });
-  const { text_embeds } = await text_model(text_inputs);
+  // Get dimensions - positive and negative embedding arrays have the same vector length
+  const nPositive = positiveEmbeddingsData.length;
+  const nNegative = negativeEmbeddingsData.length;
+  const embeddingSize = positiveEmbeddingsData[0].length;
 
-  const normedEmbeds = text_embeds.normalize(2, -1);
-
-  const nPos = positiveQualityPrompts.length;
-  const nNeg = negativeQualityPrompts.length;
-
-  const positiveEmbeddings = normedEmbeds.slice(
-    [0, nPos],
-    [0, normedEmbeds.dims[1]]
+  // Convert to tensors
+  const positiveEmbeddings = new Tensor(
+    'float32',
+    Float32Array.from(positiveEmbeddingsData.flat()),
+    [nPositive, embeddingSize]
   );
-  const negativeEmbeddings = normedEmbeds.slice(
-    [nPos, nPos + nNeg],
-    [0, normedEmbeds.dims[1]]
+
+  const negativeEmbeddings = new Tensor(
+    'float32',
+    Float32Array.from(negativeEmbeddingsData.flat()),
+    [nNegative, embeddingSize]
   );
+
   return { positiveEmbeddings, negativeEmbeddings };
 }
 
